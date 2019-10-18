@@ -3,6 +3,7 @@ project(tensorflow_object_detector)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_BUILD_TYPE Release)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -153,3 +154,12 @@ target_link_libraries(tensorflow_object_detector
   tensorflow
 )
 
+add_executable(tensorflow_object_detector_gp_node
+               src/tensorflow_object_detector_gp_node.cpp)
+add_dependencies(tensorflow_object_detector_gp_node tensorflow_object_detector_lib)
+target_link_libraries(tensorflow_object_detector_gp_node
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBS}
+  tensorflow_object_detector_lib
+  tensorflow
+)

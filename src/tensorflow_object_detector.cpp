@@ -22,6 +22,12 @@ TensorFlowObjectDetector::TensorFlowObjectDetector(const std::string& graph_path
     {
         auto status = TensorFlowUtil::createStatus();
         auto options = TensorFlowUtil::createSessionOptions();
+        uint8_t intra_op_parallelism_threads = 2;
+        uint8_t inter_op_parallelism_threads = 2;
+        uint8_t buf[]={0x10, intra_op_parallelism_threads, 0x28, inter_op_parallelism_threads};
+        TF_SetConfig(options.get(), buf, sizeof(buf), status.get());
+        if (TF_GetCode(status.get()) != TF_OK)
+            std::cerr << "ERROR: " << TF_Message(status.get()) << std::endl;
         session_ = TensorFlowUtil::createSession(graph_.get(), options.get());
     }
 
@@ -56,7 +62,7 @@ std::vector<TensorFlowObjectDetector::Result> TensorFlowObjectDetector::detect(c
     const auto channels = image.channels();
 
     //setup input image tensor
-    //TODO improve copy method for faster execution
+    //TODO: improve copy method for faster execution
     Eigen::Tensor<uint8_t, 4, Eigen::RowMajor> eigen_tensor(1, rows, cols, channels);
     for (auto y = 0; y < rows; ++y)
         for (auto x = 0; x < cols; ++x)
