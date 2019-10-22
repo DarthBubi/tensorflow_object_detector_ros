@@ -29,8 +29,11 @@ TensorFlowObjectDetectorGPCore::TensorFlowObjectDetectorGPCore(const ros::NodeHa
     imageSubscriber_.reset(new message_filters::Subscriber<sensor_msgs::Image>(nh_, camera_ns + "/rgb/image_rect_color", 1));
     cameraInfoSubscriber_.reset(new message_filters::Subscriber<sensor_msgs::CameraInfo>(nh_, camera_ns + "/rgb/camera_info", 1));
     groundPlaneSubscriber.reset(new message_filters::Subscriber<rwth_perception_people_msgs::GroundPlane>(nh_, ground_plane, 1));
-
-    sync.reset(new message_filters::Synchronizer<SyncPolicy>(SyncPolicy(queue_size), *imageSubscriber_,
+    
+    SyncPolicy sp = SyncPolicy(queue_size);
+    sp.setAgePenalty(1000);
+    const SyncPolicy MySyncPolicy = sp;
+    sync.reset(new message_filters::Synchronizer<SyncPolicy>(MySyncPolicy, *imageSubscriber_,
                                                              *cameraInfoSubscriber_, *groundPlaneSubscriber));
     sync->registerCallback(boost::bind(&TensorFlowObjectDetectorGPCore::imageCallback, this, _1, _2, _3));
 
@@ -44,12 +47,9 @@ TensorFlowObjectDetectorGPCore::TensorFlowObjectDetectorGPCore(const ros::NodeHa
 
 void TensorFlowObjectDetectorGPCore::getRay(const Eigen::Matrix3d& K, const Eigen::Vector3d& x, Eigen::Vector3d& ray1, Eigen::Vector3d& ray2)
 {
-    Eigen::Matrix3d Kinv = K.inverse();
-
     ray1 = Eigen::Vector3d().Zero();
-
     Eigen::Matrix3d rot = Eigen::Matrix3d::Identity();
-    rot *= Kinv;
+    rot *= K.inverse();
     ray2 = rot * x;
 }
 
@@ -122,75 +122,73 @@ void TensorFlowObjectDetectorGPCore::imageCallback(const sensor_msgs::Image::Con
     auto width = cv_ptr->image.cols;
 
     //draw detection rect
-    for (const auto& result : results)
+    if (imagePublisher_.getNumSubscribers())
     {
-        if (result.label_index != 1)
-            continue;
-        static const cv::Scalar color(255, 0, 0);
-
-        auto topleft = result.box.min();
-        auto sizes = result.box.sizes();
-        cv::Rect rect(topleft.x() * width, topleft.y() * height, sizes.x() * width, sizes.y() * height);
-
-        // draw rectangle
-        cv::rectangle(outImage.image, rect, color, 3);
-
-        // draw label and score
-        std::stringstream ss;
-        ss << result.label << "(" << std::setprecision(2) << result.score << ")";
-        cv::putText(
-            outImage.image,
-            ss.str(),
-            cv::Point(
-                std::min(static_cast<int>(topleft.x() * width), static_cast<int>(msg->width - 100)),
-                std::max(static_cast<int>(topleft.y() * height - 10), 20)),
-            cv::FONT_HERSHEY_PLAIN, 1.0, color);
-
-
-        if (always_output_image_ || results.size() > 0)
+        for (auto&& result : results)
         {
-            imagePublisher_.publish(outImage.toImageMsg());
+            if (result.label_index != 1) continue;
+            
+            static const cv::Scalar color(255, 0, 0);
+
+            auto topleft = result.box.min();
+            auto sizes = result.box.sizes();
+            cv::Rect rect(topleft.x() * width, topleft.y() * height, sizes.x() * width, sizes.y() * height);
+
+            // draw rectangle
+            cv::rectangle(outImage.image, rect, color, 3);
+
+            // draw label and score
+            std::stringstream ss;
+            ss << result.label << "(" << std::setprecision(2) << result.score << ")";
+            cv::putText(
+                outImage.image,
+                ss.str(),
+                cv::Point(
+                    std::min(static_cast<int>(topleft.x() * width), static_cast<int>(msg->width - 100)),
+                    std::max(static_cast<int>(topleft.y() * height - 10), 20)),
+                cv::FONT_HERSHEY_PLAIN, 1.0, color);
+
+
+            if (always_output_image_ || results.size() > 0)
+            {
+                imagePublisher_.publish(outImage.toImageMsg());
+            }
         }
     }
 
     // Get GP
     Eigen::Vector3d GPN(gp->n.data());
-    double GPd =  gp->d * (-1000.0);
-    Eigen::Matrix3d K(camera_info->K.data());
+    double GPd = gp->d * (-1000.0);
+    Eigen::Matrix<double, 3, 3, Eigen::RowMajor>K(camera_info->K.data());
 
     if(pubDetectedPersons.getNumSubscribers())
     {
         spencer_tracking_msgs::DetectedPersons detected_persons;
         detected_persons.header = msg->header;
 
-        for(const auto& result : results)
+        for(auto&& result : results)
         {
-            if (result.label_index != 1)
-                continue;
+            if (result.label_index != 1) continue;
 
             auto topleft = result.box.min();
-            auto bbcenter = result.box.center();
             auto sizes = result.box.sizes();
-            float width = sizes.x() * width * world_scale;
-            float height = sizes.y() * height * world_scale;
-            float x = topleft.x() + 16. * world_scale;
-            float y = topleft.y() + 16. * world_scale;
+            double bb_width = sizes.x() * width;
+            double bb_height = sizes.y() * height;
 
-            Eigen::Vector3d normal = Eigen::Vector3d();
-            normal(0) = GPN(0);
-            normal(1) = GPN(1);
-            normal(2) = GPN(2);
+            if (bb_width > bb_height || bb_height < bb_width * 2.5) continue;
+            double x = topleft.x() * width;
+            double y = topleft.y() * height;
 
             Eigen::Vector3d pos3D;
-            calc3DPosFromBBox(K, normal, GPd, x, y, width, height, world_scale, pos3D);
+            calc3DPosFromBBox(K, GPN, GPd, x, y, bb_width, bb_height, world_scale, pos3D);
 
             // DetectedPerson for SPENCER
             spencer_tracking_msgs::DetectedPerson detected_person;
             detected_person.modality = spencer_tracking_msgs::DetectedPerson::MODALITY_GENERIC_MONOCULAR_VISION;
             detected_person.confidence = result.score;
-            detected_person.pose.pose.position.x = -pos3D(0) / 1000.;
-            detected_person.pose.pose.position.y = -pos3D(1) / 1000.;
-            detected_person.pose.pose.position.z = -pos3D(2) / 1000.;  
+            detected_person.pose.pose.position.x = -pos3D(0);
+            detected_person.pose.pose.position.y = -pos3D(1);
+            detected_person.pose.pose.position.z = -pos3D(2);  
             detected_person.pose.pose.orientation.w = 1.0;
 
             const double LARGE_VARIANCE = 999999999;
@@ -208,8 +206,7 @@ void TensorFlowObjectDetectorGPCore::imageCallback(const sensor_msgs::Image::Con
         }
 
         // Publish
-        if (detected_persons.detections.size() > 0)
-            pubDetectedPersons.publish(detected_persons);
+        pubDetectedPersons.publish(detected_persons);
     }
 }
 
